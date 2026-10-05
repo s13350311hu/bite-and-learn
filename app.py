@@ -18,7 +18,7 @@ import google.generativeai as genai
 # 從 Streamlit Cloud 的 Secrets 安全讀取金鑰並設定 Gemini
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 # 使用 Gemini 1.5 Flash 模型，反應速度最快適合網頁互動
-llm_model = genai.GenerativeModel('gemini-1.5-flash-latest')
+llm_model = genai.GenerativeModel('gemini-pro')
 from ultralytics import YOLO
 
 # ==========================================
