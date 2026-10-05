@@ -219,7 +219,7 @@ def generate_dynamic_warning(food_name):
         response = llm_model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return "⚠️ AI 護理師暫時去喝水了，請注意飲食均衡喔！"
+        return f"⚠️ 發生錯誤，抓到真兇了：{str(e)}"
 
 # ==========================================
 # 4. 主程序與四宮格卡片呈現
