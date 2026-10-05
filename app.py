@@ -15,10 +15,23 @@ from PIL import Image
 import streamlit as st
 import google.generativeai as genai
 
-# 從 Streamlit Cloud 的 Secrets 安全讀取金鑰並設定 Gemini
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-# 使用 Gemini 1.5 Flash 模型，反應速度最快適合網頁互動
-llm_model = genai.GenerativeModel('gemini-pro')
+
+# 1. 建立一個預設的模型名稱
+valid_model_name = "gemini-1.5-flash" 
+
+# 2. 讓程式自動連線 Google 伺服器，列出這把金鑰目前「真正支援」的所有模型
+try:
+    for m in genai.list_models():
+        # 只要發現有支援「內容生成 (generateContent)」的模型，就立刻抓下來用
+        if 'generateContent' in m.supported_generation_methods:
+            valid_model_name = m.name.replace('models/', '')
+            break # 抓到第一個能用的就停止尋找
+except Exception:
+    pass 
+
+# 3. 將自動抓到的正確名稱餵給系統
+llm_model = genai.GenerativeModel(valid_model_name)
 from ultralytics import YOLO
 
 # ==========================================
