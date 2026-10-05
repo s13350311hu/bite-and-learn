@@ -220,7 +220,11 @@ def generate_dynamic_warning(food_name):
         response = llm_model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"⚠️ 發生錯誤，抓到真兇了：{str(e)}"
+        error_msg = str(e)
+        if "429" in error_msg:
+            return "⚠️ 哎呀！大家太熱情了，AI 護理師有點喘不過氣，請等待 10 秒後再試一次喔！"
+        else:
+            return f"⚠️ 發生未知異常：{error_msg}"
 
 # ==========================================
 # 4. 主程序與四宮格卡片呈現
