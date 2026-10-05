@@ -13,6 +13,12 @@ import pandas as pd
 import numpy as np
 from PIL import Image
 import streamlit as st
+import google.generativeai as genai
+
+# 從 Streamlit Cloud 的 Secrets 安全讀取金鑰並設定 Gemini
+genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+# 使用 Gemini 1.5 Flash 模型，反應速度最快適合網頁互動
+llm_model = genai.GenerativeModel('gemini-1.5-flash')
 from ultralytics import YOLO
 
 # ==========================================
@@ -200,7 +206,20 @@ def render_sidebar():
         st.caption("Powered by Streamlit & Ultralytics YOLOv8")
 
     return input_image
-
+@st.cache_data(show_spinner="生醫系 AI 正在為您生成專屬分析...")
+def generate_dynamic_warning(food_name):
+    """將辨識出的食物名稱丟給 Gemini，動態生成生醫警語"""
+    prompt = f"""
+    你現在是一位充滿幽默感、具備醫學與營養學知識的生醫系大學生。
+    使用者剛剛用系統掃描到準備吃「{food_name}」。
+    請用繁體中文，用大約 50 到 80 字的一小段話，給予健康警告或營養提示。
+    語氣要生動活潑、有點像在吐槽或關心朋友，讓大學生看了會有共鳴。
+    """
+    try:
+        response = llm_model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return "⚠️ AI 護理師暫時去喝水了，請注意飲食均衡喔！"
 
 # ==========================================
 # 4. 主程序與四宮格卡片呈現
@@ -324,15 +343,19 @@ def main():
 
     col3, col4 = st.columns(2, gap="large")
 
-    # 第二列左：🩺 [生醫警語]
+    # 第二列左：🩺 [生醫警語] (Gemini 升級版)
     with col3:
         st.markdown("""
         <div class="card-box">
-            <div class="card-header">🩺 [生醫警語]</div>
+            <div class="card-header">🩺 [生醫 AI 動態分析]</div>
         </div>
         """, unsafe_allow_html=True)
-        st.info(f"**🔬 身體生理與健康風險提醒：**\n\n{bio_warning}")
-        st.caption("※ 本衛教內容僅供日常健康生活管理參考，特殊病況請諮詢醫師或合格營養師。")
+        
+        # 呼叫剛才寫好的函式，傳入食物名稱，讓 AI 即興發揮
+        dynamic_warning = generate_dynamic_warning(en_word)
+        
+        st.info(f"**🔬 來自生醫系 AI 的專屬提醒：**\n\n{dynamic_warning}")
+        st.caption("※ 本衛教內容由 Gemini AI 生成，僅供日常健康生活管理參考。")
 
     # 第二列右：🎌 [外語與文化微學習]
     with col4:
