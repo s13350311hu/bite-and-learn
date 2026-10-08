@@ -77,6 +77,25 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- 【新增功能：遊戲化與習慣養成 (Session State)】 ---
+if 'exp_points' not in st.session_state:
+    st.session_state.exp_points = 0
+if 'streak_days' not in st.session_state:
+    st.session_state.streak_days = 1 
+
+# --- 【新增功能：側邊欄玩家儀表板與語言分級】 ---
+with st.sidebar:
+    st.header("👤 玩家儀表板")
+    st.metric(label="🔥 連續紀錄天數", value=f"{st.session_state.streak_days} 天")
+    st.progress(min(st.session_state.exp_points / 100, 1.0), text=f"🌟 經驗值: {st.session_state.exp_points}/100")
+    
+    st.divider()
+    st.subheader("📚 外語學習設定")
+    lang_level = st.selectbox(
+        "請選擇您的語言程度：",
+        ["🌱 零基礎 (僅單字與發音)", "🚶 基礎 (日常短句)", "🔥 進階 (深度文化)"]
+    )
+    st.caption("系統將根據您的等級動態調整學習內容！")
 
 # ==========================================
 # 2. 核心資源載入與快取 (Cached Resources)
@@ -304,87 +323,140 @@ def main():
 
     st.success(f"🎯 成功辨識餐點：**{en_word}** (`{detected_label}`)！信心度：**{best_conf:.1%}**")
 
-    # ==========================================
-    # 四宮格卡片排版 (2 x 2 佈局)
-    # ==========================================
-    col1, col2 = st.columns(2, gap="large")
+    # ==========================================================
+    # 🟢 步驟二與步驟三：將原本的四宮格裝進「健康分頁」，並新增外語與測驗分頁
+    # ==========================================================
+    st.divider() # 畫一條分隔線讓畫面更清楚
+    tab_health, tab_learn, tab_quiz = st.tabs(["⚡ 快速健康紀錄", "🌍 外語文化探索", "🎯 每日測驗任務"])
 
-    # 第一列左：📷 [AI 視覺辨識]
-    with col1:
-        st.markdown("""
-        <div class="card-box">
-            <div class="card-header">📷 [AI 視覺辨識]</div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.image(plotted_rgb, caption=f"標籤: {detected_label} | 置信度: {best_conf:.1%}", use_container_width=True)
-        st.markdown(
-            f"**AI 辨識食物標籤**：`{detected_label}` "
-            f"<span class='badge badge-label'>信心度：{best_conf:.1%}</span>",
-            unsafe_allow_html=True
-        )
+    # --- 第一個分頁：原有的四宮格功能 ---
+    with tab_health:
+        st.info("💡 適合只想快速記錄健康的人！")
+        # ==========================================
+        # 四宮格卡片排版 (2 x 2 佈局)
+        # ==========================================
+        col1, col2 = st.columns(2, gap="large")
+    
+        # 第一列左：📷 [AI 視覺辨識]
+        with col1:
+            st.markdown("""
+            <div class="card-box">
+                <div class="card-header">📷 [AI 視覺辨識]</div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.image(plotted_rgb, caption=f"標籤: {detected_label} | 置信度: {best_conf:.1%}", use_container_width=True)
+            st.markdown(
+                f"**AI 辨識食物標籤**：`{detected_label}` "
+                f"<span class='badge badge-label'>信心度：{best_conf:.1%}</span>",
+                unsafe_allow_html=True
+            )
+    
+        # 第一列右：🚦 [食科紅綠燈]
+        with col2:
+            st.markdown("""
+            <div class="card-box">
+                <div class="card-header">🚦 [食科紅綠燈]</div>
+            </div>
+            """, unsafe_allow_html=True)
+    
+            # 根據燈號給予對應提示色彩
+            if "🔴" in str(traffic_light) or "紅燈" in str(traffic_light):
+                st.error(f"### {traffic_light}")
+                st.markdown("⚠️ **營養評價**：屬於高熱量、高鈉或過度加工類別，建議嚴格控管攝取頻率。")
+            elif "🟡" in str(traffic_light) or "黃燈" in str(traffic_light):
+                st.warning(f"### {traffic_light}")
+                st.markdown("⚖️ **營養評價**：屬於適量食用類別，請搭配不同食物均衡攝取。")
+            else:
+                st.success(f"### {traffic_light}")
+                st.markdown("🌿 **營養評價**：富含優質微量元素或高膳食纖維，屬健康推薦食材！")
+    
+            st.metric(label="健康等級", value=str(traffic_light).split()[0] + " 評級")
+    
+        st.markdown("<br>", unsafe_allow_html=True)
+    
+        col3, col4 = st.columns(2, gap="large")
+    
+        # 第二列左：🩺 [生醫警語] (Gemini 升級版)
+        with col3:
+            st.markdown("""
+            <div class="card-box">
+                <div class="card-header">🩺 [生醫 AI 動態分析]</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # 呼叫剛才寫好的函式，傳入食物名稱，讓 AI 即興發揮
+            dynamic_warning = generate_dynamic_warning(en_word)
+            
+            st.info(f"**🔬 來自生醫系 AI 的專屬提醒：**\n\n{dynamic_warning}")
+            st.caption("※ 本衛教內容由 Gemini AI 生成，僅供日常健康生活管理參考。")
+    
+        # 第二列右：🎌 [外語與文化微學習]
+        with col4:
+            st.markdown("""
+            <div class="card-box">
+                <div class="card-header">🎌 [外語與文化微學習]</div>
+            </div>
+            """, unsafe_allow_html=True)
+    
+            # 雙語單字對照卡片
+            sub_c1, sub_c2 = st.columns(2)
+            with sub_c1:
+                st.metric(label="英語 English", value=str(en_word))
+            with sub_c2:
+                st.metric(label="日語 日本語", value=str(jp_word))
+    
+            st.markdown("---")
+            # 下拉式互動測驗 (Expander)
+            with st.expander("💡 點我展開隨堂文化測驗！"):
+                st.markdown(f"**題目：{quiz_question}**")
+                show_ans = st.checkbox("🙋 查看解答", key="reveal_quiz_answer")
+                if show_ans:
+                    st.markdown(f"🎉 **正解：** :green[**{quiz_ans}**]")
 
-    # 第一列右：🚦 [食科紅綠燈]
-    with col2:
-        st.markdown("""
-        <div class="card-box">
-            <div class="card-header">🚦 [食科紅綠燈]</div>
-        </div>
-        """, unsafe_allow_html=True)
+# --- 第二個分頁：外語與文化探索 (支援直覺式翻譯) ---
+            with tab_learn:
+                st.info(f"💡 目前您的學習難度設定為：**{lang_level}**")
+                
+                st.markdown("### 📖 互動式微學習文本")
+                st.markdown("**(請將滑鼠游標停在底線粗體字上，即可觀看翻譯！)**")
+                
+                # 這裡使用安全的 HTML 標籤來實現懸停翻譯
+                sample_html_text = f"""
+                <div style="font-size: 18px; line-height: 1.8; background-color: #f8fafc; padding: 20px; border-radius: 12px; border-left: 5px solid #3b82f6;">
+                    這是一份傳統的美食，我們剛剛辨識出這是 
+                    <abbr title="{en_word}" style="text-decoration: underline dotted #3b82f6; font-weight: bold; cursor: help;">{zh_word}</abbr>。
+                    <br><br>
+                    它通常含有豐富的 <abbr title="Carbohydrates (碳水化合物)" style="text-decoration: underline dotted #3b82f6; font-weight: bold; cursor: help;">碳水</abbr> 與些許的 
+                    <abbr title="Protein (蛋白質)" style="text-decoration: underline dotted #3b82f6; font-weight: bold; cursor: help;">蛋白質</abbr>。
+                    在日本，大家也很喜歡吃 <abbr title="Matcha (抹茶)" style="text-decoration: underline dotted #22c55e; font-weight: bold; cursor: help;">抹茶</abbr> 相關的甜點來搭配。
+                </div>
+                """
+                st.markdown(sample_html_text, unsafe_allow_html=True)
+                
+                st.write("")
+                st.button("🔊 點我聆聽全文發音 (即將推出)")
 
-        # 根據燈號給予對應提示色彩
-        if "🔴" in str(traffic_light) or "紅燈" in str(traffic_light):
-            st.error(f"### {traffic_light}")
-            st.markdown("⚠️ **營養評價**：屬於高熱量、高鈉或過度加工類別，建議嚴格控管攝取頻率。")
-        elif "🟡" in str(traffic_light) or "黃燈" in str(traffic_light):
-            st.warning(f"### {traffic_light}")
-            st.markdown("⚖️ **營養評價**：屬於適量食用類別，請搭配不同食物均衡攝取。")
-        else:
-            st.success(f"### {traffic_light}")
-            st.markdown("🌿 **營養評價**：富含優質微量元素或高膳食纖維，屬健康推薦食材！")
-
-        st.metric(label="健康等級", value=str(traffic_light).split()[0] + " 評級")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    col3, col4 = st.columns(2, gap="large")
-
-    # 第二列左：🩺 [生醫警語] (Gemini 升級版)
-    with col3:
-        st.markdown("""
-        <div class="card-box">
-            <div class="card-header">🩺 [生醫 AI 動態分析]</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # 呼叫剛才寫好的函式，傳入食物名稱，讓 AI 即興發揮
-        dynamic_warning = generate_dynamic_warning(en_word)
-        
-        st.info(f"**🔬 來自生醫系 AI 的專屬提醒：**\n\n{dynamic_warning}")
-        st.caption("※ 本衛教內容由 Gemini AI 生成，僅供日常健康生活管理參考。")
-
-    # 第二列右：🎌 [外語與文化微學習]
-    with col4:
-        st.markdown("""
-        <div class="card-box">
-            <div class="card-header">🎌 [外語與文化微學習]</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # 雙語單字對照卡片
-        sub_c1, sub_c2 = st.columns(2)
-        with sub_c1:
-            st.metric(label="英語 English", value=str(en_word))
-        with sub_c2:
-            st.metric(label="日語 日本語", value=str(jp_word))
-
-        st.markdown("---")
-        # 下拉式互動測驗 (Expander)
-        with st.expander("💡 點我展開隨堂文化測驗！"):
-            st.markdown(f"**題目：{quiz_question}**")
-            show_ans = st.checkbox("🙋 查看解答", key="reveal_quiz_answer")
-            if show_ans:
-                st.markdown(f"🎉 **正解：** :green[**{quiz_ans}**]")
-
+            # --- 第三個分頁：遊戲化隨堂測驗 ---
+            with tab_quiz:
+                st.info("💡 回答問題賺取經驗值！累積滿 100 分即可升級。")
+                st.markdown(f"### 🎯 隨堂挑戰：關於 {zh_word}")
+                
+                q1 = st.radio(
+                    f"請問根據生醫系 AI 的建議，吃 {zh_word} 最需要注意什麼？",
+                    ["選項 A：多喝水以幫助代謝", "選項 B：注意隱藏的糖分與熱量", "選項 C：完全不能吃"],
+                    index=None 
+                )
+                
+                if st.button("🚀 送出答案"):
+                    if q1 == "選項 B：注意隱藏的糖分與熱量":
+                        st.success("🎉 答對了！恭喜獲得經驗值 +10 🌟")
+                        # 答對就加分，並重新整理讓左側進度條更新
+                        st.session_state.exp_points += 10
+                        st.rerun()
+                    elif q1 == None:
+                        st.warning("請先選擇一個答案喔！")
+                    else:
+                        st.error("哎呀，答錯了，請回『健康紀錄』頁籤再看一次生醫警語喔！")
 
 # ==========================================
 # 程式進入點
