@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 Bite & Learn 跨界識食 - 智慧衛教 APP (V2)
@@ -45,8 +46,16 @@ import pandas as pd
 import numpy as np
 from PIL import Image
 import streamlit as st
+import streamlit.components.v1 as components
 import google.generativeai as genai
 from ultralytics import YOLO
+ 
+# gTTS 為選用套件：裝了就用伺服器端語音 (st.audio)，沒裝則自動退回瀏覽器內建語音
+try:
+    from gtts import gTTS
+    GTTS_OK = True
+except Exception:
+    GTTS_OK = False
  
 # ==========================================
 # 0. 全域常數與 LLM 初始化
@@ -55,7 +64,11 @@ from ultralytics import YOLO
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
  
 # 模型名稱集中管理，日後換版只需改這一行
-GEMINI_MODEL_NAME = "gemini-3.8-flash"
+# 可在 secrets.toml 加一行 GEMINI_MODEL = "gemini-2.5-flash" 覆蓋，不用改程式碼
+try:
+    GEMINI_MODEL_NAME = st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")
+except Exception:
+    GEMINI_MODEL_NAME = "gemini-3.8-flash"
 llm_model = genai.GenerativeModel(GEMINI_MODEL_NAME)
  
 # 遊戲化參數
@@ -256,6 +269,32 @@ def _parse_json(text: str):
     return json.loads(cleaned)
  
  
+def _log_llm_error(tag: str, e: Exception):
+    """把真正的錯誤原因記下來，顯示在側邊欄「API 診斷」，不再被備援機制默默吞掉"""
+    errs = st.session_state.setdefault("llm_errors", [])
+    errs.append(f"[{datetime.now(TZ_TAIPEI):%H:%M:%S}] {tag} -> {type(e).__name__}: {e}")
+    del errs[:-6]   # 只保留最近 6 筆
+ 
+ 
+def _safe_generate(prompt: str, tag: str, json_mode: bool = False):
+    """
+    呼叫 Gemini，回傳 (文字, 例外)。
+    若 JSON 模式失敗，會自動退回一般文字模式再試一次
+    (部分模型/SDK 版本不支援 response_mime_type)。
+    """
+    try:
+        return _gemini_generate(prompt, json_mode), None
+    except Exception as e:
+        _log_llm_error(tag, e)
+        if json_mode:
+            try:
+                return _gemini_generate(prompt, False), None
+            except Exception as e2:
+                _log_llm_error(tag + "(retry)", e2)
+                return None, e2
+        return None, e
+ 
+ 
 def generate_dynamic_warning(food_name: str) -> str:
     """將辨識出的食物名稱丟給 Gemini，動態生成生醫警語"""
     prompt = f"""
@@ -264,10 +303,8 @@ def generate_dynamic_warning(food_name: str) -> str:
     請用繁體中文，用大約 50 到 80 字的一小段話，給予健康警告或營養提示。
     語氣要生動活潑、有點像在吐槽或關心朋友，讓大學生看了會有共鳴。
     """
-    try:
-        return _gemini_generate(prompt)
-    except Exception as e:
-        return _friendly_error(e)
+    text, err = _safe_generate(prompt, "生醫警語")
+    return text if text else _friendly_error(err)
  
  
 # ---------- 外語文本 (依程度分級) ----------
@@ -329,13 +366,15 @@ def generate_culture_text(en_word: str, jp_word: str, level: str) -> tuple:
       "jp": {{"sentence": "...", "translation_zh": "...", "vocab": [{{"word": "...", "meaning": "..."}}]}}
     }}
     """
-    try:
-        raw = _gemini_generate(prompt, json_mode=True)
-        data = _parse_json(raw)
-        if _valid_culture(data):
-            return data, False
-    except Exception:
-        pass
+    raw, _err = _safe_generate(prompt, "外語例句", json_mode=True)
+    if raw:
+        try:
+            data = _parse_json(raw)
+            if _valid_culture(data):
+                return data, False
+            _log_llm_error("外語例句", ValueError("JSON 結構不符預期"))
+        except Exception as e:
+            _log_llm_error("外語例句(解析)", e)
     return _fallback_culture(en_word, jp_word), True
  
  
@@ -377,6 +416,59 @@ def build_abbr_html(sentence: str, vocab: list) -> str:
     return pattern.sub(_wrap, escaped_sentence)
  
  
+# ---------- 發音 (TTS) ----------
+def clean_speech_text(text: str) -> str:
+    """去掉『ピザ (Piza)』這類括號羅馬拼音，只留要念的文字"""
+    return re.sub(r"\s*[\(（].*?[\)）]", "", str(text)).strip()
+ 
+ 
+@st.cache_data(show_spinner=False, ttl=86400)
+def tts_audio_bytes(text: str, lang: str) -> bytes:
+    """gTTS 伺服器端語音 (需安裝 gTTS 並能連外)。失敗時讓例外往外拋，不快取錯誤。"""
+    buf = io.BytesIO()
+    gTTS(text=text, lang=lang).write_to_fp(buf)
+    return buf.getvalue()
+ 
+ 
+def render_speech_panel(items: list, lang_code: str, height: int = 70):
+    """
+    以瀏覽器內建 Web Speech API 產生一排發音按鈕 (免 API、免安裝套件)。
+    items: [(按鈕文字, 要念的文字), ...]；lang_code: 'en-US' / 'ja-JP'
+    """
+    buttons = "".join(
+        f'<button onclick=\'speak({json.dumps(txt, ensure_ascii=False)})\'>🔊 {html.escape(label)}</button>'
+        for label, txt in items if txt
+    )
+    page = f"""
+    <style>
+      button {{margin:2px 4px 2px 0;padding:4px 10px;border:1px solid #CBD5E1;border-radius:9999px;
+              background:#EEF2FF;color:#4F46E5;font-size:14px;cursor:pointer;}}
+      button:hover {{background:#E0E7FF;}}
+    </style>
+    <div>{buttons}</div>
+    <script>
+      function speak(t) {{
+        if (!('speechSynthesis' in window)) {{ alert('此瀏覽器不支援語音合成'); return; }}
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(t);
+        u.lang = '{lang_code}'; u.rate = 0.9;
+        window.speechSynthesis.speak(u);
+      }}
+    </script>
+    """
+    components.html(page, height=height, scrolling=True)
+ 
+ 
+def render_tts_audio(text: str, gtts_lang: str):
+    """若有安裝 gTTS，額外提供可播放的音訊列；沒有就靜默略過"""
+    if not GTTS_OK or not text:
+        return
+    try:
+        st.audio(tts_audio_bytes(text, gtts_lang), format="audio/mp3")
+    except Exception as e:
+        _log_llm_error("gTTS", e)
+ 
+ 
 # ---------- 動態測驗 ----------
 def _fallback_quiz(row: pd.Series, food_df: pd.DataFrame, seed: str) -> dict:
     """
@@ -410,8 +502,9 @@ def generate_quiz(row: pd.Series, food_df: pd.DataFrame, level: str, seed: str) 
     只回傳 JSON：
     {{"question": "...", "options": ["A選項", "B選項", "C選項", "D選項"], "answer": "必須與 options 其中一項完全相同", "explanation": "30 字內的解說"}}
     """
+    raw, _err = _safe_generate(prompt, "動態測驗", json_mode=True)
     try:
-        data = _parse_json(_gemini_generate(prompt, json_mode=True))
+        data = _parse_json(raw)
         options = [str(o).strip() for o in data["options"]]
         answer = str(data["answer"]).strip()
         # 驗證：4 個互異選項、且正解必須在選項中
@@ -566,6 +659,27 @@ def render_player_dashboard():
     )
  
  
+def render_api_diagnostics():
+    """側邊欄「API 診斷」：直接顯示 Gemini 真正的錯誤原因，不再只看到備援內容"""
+    with st.expander("🔧 API 診斷"):
+        st.caption(f"模型：`{GEMINI_MODEL_NAME}`｜gTTS：{'已安裝' if GTTS_OK else '未安裝（使用瀏覽器語音）'}")
+        if st.button("測試 Gemini 連線", key="api_ping"):
+            try:
+                r = llm_model.generate_content("請只回覆：OK")
+                st.success(f"連線成功：{r.text.strip()[:40]}")
+            except Exception as e:
+                st.error(f"{type(e).__name__}: {e}")
+        if st.button("列出可用模型", key="api_list"):
+            try:
+                names = [m.name.replace("models/", "") for m in genai.list_models()
+                         if "generateContent" in m.supported_generation_methods]
+                st.code("\n".join(names) or "（沒有可用模型）")
+            except Exception as e:
+                st.error(f"{type(e).__name__}: {e}")
+        for line in reversed(st.session_state.get("llm_errors", [])):
+            st.caption(line)
+ 
+ 
 def render_sidebar():
     """
     回傳 (image, image_sig, lang_level)
@@ -634,6 +748,7 @@ def render_sidebar():
                 input_image = Image.open(io.BytesIO(data))
  
         st.markdown("---")
+        render_api_diagnostics()
         st.caption("Powered by Streamlit, Ultralytics YOLOv8 & Google Gemini")
  
     return input_image, image_sig, lang_level
@@ -710,6 +825,13 @@ def render_tab_language(en_word, jp_word, quiz_question, quiz_ans, lang_level):
     with sub_c2:
         st.metric(label="日語 日本語", value=str(jp_word))
  
+    # 🔊 食物單字發音
+    pc1, pc2 = st.columns(2)
+    with pc1:
+        render_speech_panel([(str(en_word), str(en_word))], "en-US", height=50)
+    with pc2:
+        render_speech_panel([(clean_speech_text(jp_word), clean_speech_text(jp_word))], "ja-JP", height=50)
+ 
     st.markdown("---")
     st.markdown(f"##### 📖 {lang_level}程度例句　<small>（把滑鼠移到<u>虛線單字</u>上看翻譯）</small>",
                 unsafe_allow_html=True)
@@ -728,6 +850,13 @@ def render_tab_language(en_word, jp_word, quiz_question, quiz_ans, lang_level):
             # ★ 使用 unsafe_allow_html 渲染 <abbr>；內容已在 build_abbr_html 內完成 escape
             st.markdown(f'<div class="abbr-sentence">{abbr_html}</div>', unsafe_allow_html=True)
             st.caption(f"中文：{html.escape(block['translation_zh'])}")
+            # 🔊 整句 + 每個單字的發音按鈕
+            speech_items = [("整句", block["sentence"])] + [
+                (str(v.get("word", "")), str(v.get("word", "")))
+                for v in block["vocab"] if isinstance(v, dict) and v.get("word")
+            ]
+            render_speech_panel(speech_items, "en-US" if lang_key == "en" else "ja-JP", height=90)
+            render_tts_audio(block["sentence"], "en" if lang_key == "en" else "ja")
  
     st.caption("💡 手機等觸控裝置無法「懸停」，可長按單字查看；完整單字表如下。")
     with st.expander("📚 本句單字表"):
