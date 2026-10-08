@@ -82,6 +82,12 @@ if 'exp_points' not in st.session_state:
     st.session_state.exp_points = 0
 if 'streak_days' not in st.session_state:
     st.session_state.streak_days = 1 
+# 這兩段：設定測驗鎖的初始狀態，以及解鎖的 Callback 函數
+if 'quiz_passed' not in st.session_state:
+    st.session_state.quiz_passed = False
+
+def reset_quiz_state():
+    st.session_state.quiz_passed = False
 
 # --- 【新增功能：側邊欄玩家儀表板與語言分級】 ---
 with st.sidebar:
@@ -210,14 +216,14 @@ def render_sidebar():
             uploaded_file = st.file_uploader(
                 label="選擇一張食物照片",
                 type=["jpg", "jpeg", "png", "webp"],
-                help="支援常見格式如 JPG、PNG、WEBP"
+                help="支援常見格式如 JPG、PNG、WEBP", on_change=reset_quiz_state
             )
             if uploaded_file is not None:
                 input_image = Image.open(uploaded_file)
         else:
             camera_file = st.camera_input(
                 label="對準食物拍攝照片",
-                help="需允許瀏覽器存取相機進行拍攝"
+                help="需允許瀏覽器存取相機進行拍攝", on_change=reset_quiz_state
             )
             if camera_file is not None:
                 input_image = Image.open(camera_file)
@@ -453,23 +459,30 @@ def main():
                 st.write("")
                 st.button("🔊 點我聆聽全文發音 (即將推出)")
 
-            # --- 第三個分頁：遊戲化隨堂測驗 ---
+# --- 第三個分頁：遊戲化隨堂測驗 ---
             with tab_quiz:
-                # 這裡因為上面已經宣告過 zh_word，所以可以直接使用！
                 st.info("💡 回答問題賺取經驗值！累積滿 100 分即可升級。")
                 st.markdown(f"### 🎯 隨堂挑戰：關於 {zh_word}")
                 
+                # 1. 建立一個狀態來記錄這題是否已經過關
+                if 'quiz_passed' not in st.session_state:
+                    st.session_state.quiz_passed = False
+                
+                # 2. 如果已經答對 (quiz_passed 為 True)，就把單選題鎖起來 (disabled)
                 q1 = st.radio(
                     f"請問根據生醫系 AI 的建議，吃 {zh_word} 最需要注意什麼？",
                     ["選項 A：多喝水以幫助代謝", "選項 B：注意隱藏的糖分與熱量", "選項 C：完全不能吃"],
-                    index=None 
+                    index=None,
+                    disabled=st.session_state.quiz_passed 
                 )
                 
-                if st.button("🚀 送出答案"):
+                # 3. 按鈕也套用同一個鎖
+                if st.button("🚀 送出答案", disabled=st.session_state.quiz_passed):
                     if q1 == "選項 B：注意隱藏的糖分與熱量":
                         st.success("🎉 答對了！恭喜獲得經驗值 +10 🌟")
-                        # 答對就加分，並重新整理讓左側進度條更新
                         st.session_state.exp_points += 10
+                        # 標記為已答對，下次按鈕跟選項就會變成反灰不可點擊的狀態！
+                        st.session_state.quiz_passed = True  
                         st.rerun()
                     elif q1 == None:
                         st.warning("請先選擇一個答案喔！")
