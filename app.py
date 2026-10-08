@@ -418,9 +418,20 @@ def main():
                 st.info(f"💡 目前您的學習難度設定為：**{lang_level}**")
                 
                 # ==========================================
-                # 👇 補上這兩行，給定預設變數，消滅 NameError！
-                zh_word = "滷肉飯"
-                en_word = "Braised Pork Rice"
+                # 🔄 【關鍵修改】刪除寫死的滷肉飯，接上真實的 AI 變數！
+                
+                # 1. 英文單字直接使用 YOLO 抓到的標籤 (例如 'banana')
+                en_word = detected_label 
+                
+                # 2. 中文單字的部分，如果你已經有從 food_database.csv 轉換出來的變數，請直接用它。
+                # 如果還沒有，我們暫時先寫一個簡單的對應表（之後你可以全部搬進 CSV 裡）：
+                translation_dict = {
+                    "banana": "香蕉",
+                    "apple": "蘋果",
+                    "braised_pork_rice": "滷肉飯"
+                }
+                # 嘗試翻譯，如果字典裡沒有，就顯示原本的英文
+                zh_word = translation_dict.get(detected_label, detected_label) 
                 # ==========================================
                 
                 st.markdown("### 📖 互動式微學習文本")
