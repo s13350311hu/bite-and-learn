@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 """
 Bite & Learn 跨界識食 - 智慧衛教 APP (V2)
@@ -8,14 +7,14 @@ Bite & Learn 跨界識食 - 智慧衛教 APP (V2)
   - 電腦視覺：Ultralytics YOLOv8 (yolov8n.pt 預訓練模型)
   - 大型語言模型：Google Gemini (生醫警語 / 分級外語文本 / 動態測驗)
   - 資料處理：Pandas, Pillow (PIL), NumPy
- 
+
 V2 升級重點：
   1. st.tabs 介面分流
   2. 動態測驗 + 狀態鎖 (答對才加分、防刷分)
   3. 玩家儀表板 (Streak / EXP)
   4. 語言程度分級 (已實際串接 LLM Prompt)
   5. <abbr> 滑鼠懸停單字翻譯
- 
+
 【session_state 鍵值總覽】(維護者請先讀這段)
   --- 玩家進度 (整個 session 不重置) ---
   streak_days      : int   連續登入天數
@@ -23,7 +22,7 @@ V2 升級重點：
   exp              : int   累積經驗值
   rewarded_ids     : set   已領過獎勵的「圖片+食物」ID (防止同一張圖重複刷分)
   --- 測驗狀態 (每次換圖都會被 reset_quiz_state() 清空) ---
-  quiz_id          : str   目前測驗對應的「圖片簽章:食物標籤」
+  quiz_id          : str   目前測驗對應的「圖片簽章:食物標籤:語言程度」
   quiz_data        : dict  目前題目 {question, options, answer, explanation}
   quiz_answered    : bool  【狀態鎖】True = 已作答，選項與按鈕全部鎖定
   quiz_correct     : bool  作答是否正確
@@ -32,7 +31,7 @@ V2 升級重點：
   quiz_warn        : bool  是否顯示「請先選擇答案」提示
   quiz_nonce       : int   radio 元件的版本號，改變它 = 讓 radio 變成全新元件 (清除舊選取)
 """
- 
+
 import os
 import re
 import io
@@ -41,7 +40,7 @@ import html
 import hashlib
 import random
 from datetime import datetime, timedelta, timezone
- 
+
 import pandas as pd
 import numpy as np
 from PIL import Image
@@ -49,20 +48,20 @@ import streamlit as st
 import streamlit.components.v1 as components
 import google.generativeai as genai
 from ultralytics import YOLO
- 
+
 # gTTS 為選用套件：裝了就用伺服器端語音 (st.audio)，沒裝則自動退回瀏覽器內建語音
 try:
     from gtts import gTTS
     GTTS_OK = True
 except Exception:
     GTTS_OK = False
- 
+
 # ==========================================
 # 0. 全域常數與 LLM 初始化
 # ==========================================
 # 設定 API 金鑰 (存放於 .streamlit/secrets.toml 或 Streamlit Cloud Secrets)
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
- 
+
 # 模型名稱集中管理，日後換版只需改這一行
 # 可在 secrets.toml 加一行 GEMINI_MODEL = "gemini-2.5-flash" 覆蓋，不用改程式碼
 try:
@@ -70,12 +69,12 @@ try:
 except Exception:
     GEMINI_MODEL_NAME = "gemini-3.8-flash"
 llm_model = genai.GenerativeModel(GEMINI_MODEL_NAME)
- 
+
 # 遊戲化參數
 EXP_PER_QUIZ = 10        # 答對一題獲得的 EXP
 EXP_PER_LEVEL = 100      # 每升一級所需 EXP
 TZ_TAIPEI = timezone(timedelta(hours=8))  # 以台北時間計算「今天」，避免雲端主機 UTC 造成日期錯位
- 
+
 # 語言程度分級 -> 對應的 LLM 提示語
 LANG_LEVELS = ["零基礎", "基礎", "進階"]
 LEVEL_PROMPT_HINT = {
@@ -83,7 +82,23 @@ LEVEL_PROMPT_HINT = {
     "基礎": "學習者具備基礎文法與日常單字。句子 1~2 句，長度適中，可使用簡單的連接詞。",
     "進階": "學習者已有中高級能力。句子可包含較道地的慣用語、複合句或文化典故，詞彙可較豐富。",
 }
- 
+
+# 各程度的「測驗規格」：題型、語言、難度都不同，才會讓使用者實際感受到差異
+QUIZ_SPEC = {
+    "零基礎": (
+        "題型：單字配對。問『{en} 的中文是什麼』或『日文 {jp} 是哪一種食物』這類最基礎的辨識題。"
+        "題幹用繁體中文，選項用繁體中文或簡單單字；干擾選項請用其他常見食物，不可刁鑽。"
+    ),
+    "基礎": (
+        "題型：日常句型填空或單字應用。例如『I like ___ . (apple)』或『{jp} 要搭配哪個動詞/助詞』。"
+        "題幹可含簡單英文或日文短句，並附中文提示；選項為單字或短語。"
+    ),
+    "進階": (
+        "題型：飲食文化、慣用語、同義詞辨析或營養科學延伸。題幹與選項可以是英文或日文完整句子，"
+        "需要推理或文化背景知識才能答對；干擾選項要有迷惑性。"
+    ),
+}
+
 # ==========================================
 # 1. 頁面全域設定 (Page Config)
 # ==========================================
@@ -93,7 +108,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
- 
+
 # 注入自訂 CSS 樣式提升 UI 現代卡片質感
 st.markdown("""
 <style>
@@ -151,8 +166,8 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
- 
- 
+
+
 # ==========================================
 # 2. 核心資源載入與快取 (Cached Resources)
 # ==========================================
@@ -164,8 +179,8 @@ def load_yolo_model(model_name: str = "yolov8n.pt") -> YOLO:
     """
     model = YOLO(model_name)
     return model
- 
- 
+
+
 @st.cache_data(show_spinner="載入食物衛教資料庫...")
 def load_food_database(csv_path: str = "food_database.csv") -> pd.DataFrame:
     """
@@ -232,12 +247,12 @@ def load_food_database(csv_path: str = "food_database.csv") -> pd.DataFrame:
         df.to_csv(csv_path, index=False, encoding="utf-8-sig")
     else:
         df = pd.read_csv(csv_path, encoding="utf-8-sig")
- 
+
     # 清理 AI_Label 欄位：去除首尾空白並轉小寫，確保字串比對精確無誤
     df["AI_Label"] = df["AI_Label"].astype(str).str.strip().str.lower()
     return df
- 
- 
+
+
 # ==========================================
 # 3. Gemini 呼叫層 (快取 + 容錯)
 # ==========================================
@@ -253,29 +268,29 @@ def _gemini_generate(prompt: str, json_mode: bool = False) -> str:
     cfg = {"response_mime_type": "application/json"} if json_mode else None
     response = llm_model.generate_content(prompt, generation_config=cfg)
     return response.text
- 
- 
+
+
 def _friendly_error(e: Exception) -> str:
     """把例外轉成使用者看得懂的提示"""
     msg = str(e)
     if "429" in msg:
         return "⚠️ 哎呀！大家太熱情了，AI 護理師有點喘不過氣，請等待 10 秒後再試一次喔！"
     return f"⚠️ 發生未知異常：{msg}"
- 
- 
+
+
 def _parse_json(text: str):
     """容錯解析 LLM 回傳的 JSON（會自動剝除 ```json 圍欄）"""
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.IGNORECASE)
     return json.loads(cleaned)
- 
- 
+
+
 def _log_llm_error(tag: str, e: Exception):
     """把真正的錯誤原因記下來，顯示在側邊欄「API 診斷」，不再被備援機制默默吞掉"""
     errs = st.session_state.setdefault("llm_errors", [])
     errs.append(f"[{datetime.now(TZ_TAIPEI):%H:%M:%S}] {tag} -> {type(e).__name__}: {e}")
     del errs[:-6]   # 只保留最近 6 筆
- 
- 
+
+
 def _safe_generate(prompt: str, tag: str, json_mode: bool = False):
     """
     呼叫 Gemini，回傳 (文字, 例外)。
@@ -293,8 +308,8 @@ def _safe_generate(prompt: str, tag: str, json_mode: bool = False):
                 _log_llm_error(tag + "(retry)", e2)
                 return None, e2
         return None, e
- 
- 
+
+
 def generate_dynamic_warning(food_name: str) -> str:
     """將辨識出的食物名稱丟給 Gemini，動態生成生醫警語"""
     prompt = f"""
@@ -305,8 +320,8 @@ def generate_dynamic_warning(food_name: str) -> str:
     """
     text, err = _safe_generate(prompt, "生醫警語")
     return text if text else _friendly_error(err)
- 
- 
+
+
 # ---------- 外語文本 (依程度分級) ----------
 def _fallback_culture(en_word: str, jp_word: str) -> dict:
     """LLM 失敗時的備援文本，確保外語頁籤永遠有內容可顯示"""
@@ -331,8 +346,8 @@ def _fallback_culture(en_word: str, jp_word: str) -> dict:
             ],
         },
     }
- 
- 
+
+
 def _valid_culture(data) -> bool:
     """檢查 LLM 回傳的 JSON 結構是否符合預期，避免畫面渲染時才爆錯"""
     try:
@@ -347,8 +362,8 @@ def _valid_culture(data) -> bool:
         return True
     except Exception:
         return False
- 
- 
+
+
 def generate_culture_text(en_word: str, jp_word: str, level: str) -> tuple:
     """
     依語言程度 (level) 生成英/日文例句 + 中文翻譯 + 單字表。
@@ -376,12 +391,12 @@ def generate_culture_text(en_word: str, jp_word: str, level: str) -> tuple:
         except Exception as e:
             _log_llm_error("外語例句(解析)", e)
     return _fallback_culture(en_word, jp_word), True
- 
- 
+
+
 def build_abbr_html(sentence: str, vocab: list) -> str:
     """
     把句子中的單字包成 <abbr title="翻譯">單字</abbr>，滑鼠懸停即顯示翻譯。
- 
+
     安全設計（因為後面要用 unsafe_allow_html=True 渲染 LLM 的輸出）：
       1. 先對整句 html.escape，LLM 若夾帶 <script> 之類標籤會被轉義成純文字
       2. 用「單次 re.sub + 單一合併 pattern」做替換，
@@ -395,41 +410,41 @@ def build_abbr_html(sentence: str, vocab: list) -> str:
         meaning = str(item.get("meaning", "")).strip()
         if word and meaning:
             mapping[word.lower()] = meaning
- 
+
     escaped_sentence = html.escape(sentence)
     if not mapping:
         return escaped_sentence
- 
+
     # 長字優先比對 (例如 "hot dog" 要先於 "hot")；前後不可緊鄰英文字母，避免 eat 比對到 great
     words = sorted(mapping.keys(), key=len, reverse=True)
     pattern = re.compile(
         r"(?<![A-Za-z])(" + "|".join(re.escape(html.escape(w)) for w in words) + r")(?![A-Za-z])",
         flags=re.IGNORECASE,
     )
- 
+
     def _wrap(match):
         original_text = match.group(1)                      # 已是 escape 過的原文
         key = html.unescape(original_text).lower()
         meaning = html.escape(mapping.get(key, ""), quote=True)
         return f'<abbr title="{meaning}">{original_text}</abbr>' if meaning else original_text
- 
+
     return pattern.sub(_wrap, escaped_sentence)
- 
- 
+
+
 # ---------- 發音 (TTS) ----------
 def clean_speech_text(text: str) -> str:
     """去掉『ピザ (Piza)』這類括號羅馬拼音，只留要念的文字"""
     return re.sub(r"\s*[\(（].*?[\)）]", "", str(text)).strip()
- 
- 
+
+
 @st.cache_data(show_spinner=False, ttl=86400)
 def tts_audio_bytes(text: str, lang: str) -> bytes:
     """gTTS 伺服器端語音 (需安裝 gTTS 並能連外)。失敗時讓例外往外拋，不快取錯誤。"""
     buf = io.BytesIO()
     gTTS(text=text, lang=lang).write_to_fp(buf)
     return buf.getvalue()
- 
- 
+
+
 def render_speech_panel(items: list, lang_code: str, height: int = 70):
     """
     以瀏覽器內建 Web Speech API 產生一排發音按鈕 (免 API、免安裝套件)。
@@ -457,8 +472,8 @@ def render_speech_panel(items: list, lang_code: str, height: int = 70):
     </script>
     """
     components.html(page, height=height, scrolling=True)
- 
- 
+
+
 def render_tts_audio(text: str, gtts_lang: str):
     """若有安裝 gTTS，額外提供可播放的音訊列；沒有就靜默略過"""
     if not GTTS_OK or not text:
@@ -467,28 +482,38 @@ def render_tts_audio(text: str, gtts_lang: str):
         st.audio(tts_audio_bytes(text, gtts_lang), format="audio/mp3")
     except Exception as e:
         _log_llm_error("gTTS", e)
- 
- 
+
+
 # ---------- 動態測驗 ----------
-def _fallback_quiz(row: pd.Series, food_df: pd.DataFrame, seed: str) -> dict:
+def _fallback_quiz(row: pd.Series, food_df: pd.DataFrame, level: str, seed: str) -> dict:
     """
-    LLM 失敗時的備援：用 CSV 的題目與正解，
-    再從其他食物的正解裡抽 3 個當作干擾選項。
+    LLM 失敗時的備援，三個程度各有不同題型（不再所有程度都出同一題）：
+      零基礎：看日文選英文單字
+      基礎  ：看英文選日文單字
+      進階  ：CSV 內的文化題 (干擾選項取自其他食物的答案)
     """
-    correct = str(row["Quiz_Ans"])
-    pool = [str(a) for a in food_df["Quiz_Ans"].tolist() if str(a) != correct]
     rng = random.Random(seed)
-    distractors = rng.sample(pool, k=min(3, len(pool)))
-    options = distractors + [correct]
-    rng.shuffle(options)
-    return {
-        "question": str(row["Quiz_Question"]),
-        "options": options,
-        "answer": correct,
-        "explanation": "（本題來自內建文化題庫）",
-    }
- 
- 
+    en = str(row["EN_Word"])
+    jp = clean_speech_text(row["JP_Word"])
+    others = food_df[food_df["EN_Word"] != row["EN_Word"]]
+
+    def _build(question, correct, pool, explanation):
+        pool = [x for x in dict.fromkeys(map(str, pool)) if x != correct]
+        options = rng.sample(pool, k=min(3, len(pool))) + [correct]
+        rng.shuffle(options)
+        return {"question": question, "options": options, "answer": correct,
+                "explanation": explanation, "source": "fallback"}
+
+    if level == "零基礎":
+        return _build(f"日文的「{jp}」是下列哪一種食物？（選出英文單字）", en,
+                      others["EN_Word"].tolist(), f"{jp} 的英文是 {en}。")
+    if level == "基礎":
+        return _build(f"英文「{en}」的日文怎麼說？", jp,
+                      [clean_speech_text(x) for x in others["JP_Word"]], f"{en} 的日文是 {jp}。")
+    return _build(str(row["Quiz_Question"]), str(row["Quiz_Ans"]),
+                  others["Quiz_Ans"].tolist(), "（本題來自內建文化題庫）")
+
+
 def generate_quiz(row: pd.Series, food_df: pd.DataFrame, level: str, seed: str) -> dict:
     """
     根據 YOLO 辨識出的食物，請 Gemini 動態出 1 道四選一選擇題。
@@ -496,11 +521,15 @@ def generate_quiz(row: pd.Series, food_df: pd.DataFrame, level: str, seed: str) 
       重新整理畫面 (rerun) 時直接讀取，不會每次都重新出題或重新洗牌。
     """
     en_word = row["EN_Word"]
+    jp_word = clean_speech_text(row["JP_Word"])
+    spec = QUIZ_SPEC[level].format(en=en_word, jp=jp_word)
     prompt = f"""
-    你是一位出題老師。請針對食物「{en_word}」出 1 道繁體中文四選一選擇題，
-    主題可以是營養知識、飲食文化或英日文單字，難度對應學習者程度：{level}。
+    你是一位外語與飲食文化的出題老師。請針對食物「{en_word}」（日文：{jp_word}）出 1 道四選一選擇題。
+    學習者程度：【{level}】。{LEVEL_PROMPT_HINT[level]}
+    {spec}
+    ★ 題目難度與題型必須明顯符合「{level}」，不可出成其他程度的題目。
     只回傳 JSON：
-    {{"question": "...", "options": ["A選項", "B選項", "C選項", "D選項"], "answer": "必須與 options 其中一項完全相同", "explanation": "30 字內的解說"}}
+    {{"question": "...", "options": ["A選項", "B選項", "C選項", "D選項"], "answer": "必須與 options 其中一項完全相同", "explanation": "30 字內的繁體中文解說"}}
     """
     raw, _err = _safe_generate(prompt, "動態測驗", json_mode=True)
     try:
@@ -516,19 +545,20 @@ def generate_quiz(row: pd.Series, food_df: pd.DataFrame, level: str, seed: str) 
                 "options": options,
                 "answer": answer,
                 "explanation": str(data.get("explanation", "")).strip(),
+                "source": "ai",
             }
-    except Exception:
-        pass
-    return _fallback_quiz(row, food_df, seed)
- 
- 
+    except Exception as e:
+        _log_llm_error("動態測驗(解析)", e)
+    return _fallback_quiz(row, food_df, level, seed)
+
+
 # ==========================================
 # 4. 狀態管理核心 (Session State & Callbacks)
 # ==========================================
 def today_str() -> str:
     return datetime.now(TZ_TAIPEI).strftime("%Y-%m-%d")
- 
- 
+
+
 def init_session_state():
     """
     初始化所有 session_state 鍵值（只在鍵不存在時設定，rerun 不會覆蓋既有進度）。
@@ -552,7 +582,7 @@ def init_session_state():
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
- 
+
     # ---- Streak 邏輯（可重複執行，結果一致 → 每次 rerun 呼叫也安全）----
     today = today_str()
     last = st.session_state.last_login_date
@@ -563,18 +593,18 @@ def init_session_state():
         else:
             st.session_state.streak_days = 1      # 首次登入或中斷過 -> 從 1 開始
         st.session_state.last_login_date = today
- 
- 
+
+
 def reset_quiz_state():
     """
     【Callback】重置測驗狀態鎖。
     綁定在 st.file_uploader / st.camera_input / 輸入方式 radio 的 on_change。
- 
+
     為什麼要用 callback 而不是在主程式 if 判斷？
       Callback 會在「下一次 rerun 開始之前」執行，
       所以主程式與側邊欄渲染時，讀到的一定是已重置的乾淨狀態，
       不會出現「新圖 + 舊的已作答鎖」的瞬間錯亂。
- 
+
     注意：exp / streak / rewarded_ids 屬於玩家進度，這裡「刻意不重置」。
     """
     ss = st.session_state
@@ -587,8 +617,8 @@ def reset_quiz_state():
     ss.quiz_warn = False
     # 把 radio 的 key 換成新版本號 -> Streamlit 視為全新元件，舊的選取值自動消失
     ss.quiz_nonce += 1
- 
- 
+
+
 def submit_answer():
     """
     【Callback】送出答案。所有「改分數、上鎖」的動作都集中在這裡，
@@ -597,22 +627,22 @@ def submit_answer():
       2. 主程式每次 rerun 都會重跑，若把加分寫在主程式會被重複觸發
     """
     ss = st.session_state
- 
+
     # 【防刷分關卡 1】已作答就直接返回（連點、多分頁連送都會被擋下）
     if ss.quiz_answered or ss.quiz_data is None:
         return
- 
+
     choice = ss.get(f"quiz_choice_{ss.quiz_nonce}")
     if choice is None:
         ss.quiz_warn = True          # 尚未選擇 -> 不上鎖，只提示
         return
- 
+
     # 先上鎖，再做後續動作
     ss.quiz_warn = False
     ss.quiz_answered = True
     ss.quiz_selected = choice
     ss.quiz_correct = (choice == ss.quiz_data["answer"])
- 
+
     if ss.quiz_correct:
         # 【防刷分關卡 2】同一張圖(同一個 quiz_id)只能領一次獎勵，
         # 即使使用者重新上傳同一張照片讓測驗被 reset，也無法再次加分
@@ -624,22 +654,26 @@ def submit_answer():
             ss.quiz_reward_msg = f"🎉 獲得 +{EXP_PER_QUIZ} EXP！"
     else:
         ss.quiz_reward_msg = ""
- 
- 
+
+
 def ensure_quiz(row: pd.Series, food_df: pd.DataFrame, quiz_id: str, level: str):
     """
-    確保 session_state 裡存的題目與「目前這張圖」一致。
-    雙重保險：就算 on_change 沒被觸發（例如相機重拍），
-    只要偵測到 quiz_id 不同，也會自動重置並重新出題。
+    確保 session_state 裡存的題目與「目前這張圖 + 目前語言程度」一致。
+
+    ★ 關鍵修正：quiz_key 同時包含 圖片/食物 與 語言程度。
+      以前只比對 quiz_id（圖片），所以換程度後題目還是舊的；
+      現在程度一變，quiz_key 就不同 -> 自動重置狀態鎖並依新程度重新出題。
+    雙重保險：就算 on_change 沒被觸發（例如相機重拍），也會自動重置。
     """
     ss = st.session_state
-    if ss.quiz_id != quiz_id:
+    quiz_key = f"{quiz_id}:{level}"
+    if ss.quiz_id != quiz_key:
         reset_quiz_state()
-        ss.quiz_id = quiz_id
-        with st.spinner("AI 出題老師正在為你準備題目..."):
-            ss.quiz_data = generate_quiz(row, food_df, level, seed=quiz_id)
- 
- 
+        ss.quiz_id = quiz_key            # 也用來當作「防重複領獎」的 ID：每個程度各領一次
+        with st.spinner(f"AI 出題老師正在準備【{level}】程度的題目..."):
+            ss.quiz_data = generate_quiz(row, food_df, level, seed=quiz_key)
+
+
 # ==========================================
 # 5. 側邊欄互動模組 (Sidebar)
 # ==========================================
@@ -648,7 +682,7 @@ def render_player_dashboard():
     ss = st.session_state
     level_no = ss.exp // EXP_PER_LEVEL + 1
     exp_in_level = ss.exp % EXP_PER_LEVEL
- 
+
     st.subheader("🎮 玩家儀表板")
     c1, c2 = st.columns(2)
     c1.metric("🔥 連續登入", f"{ss.streak_days} 天")
@@ -657,8 +691,8 @@ def render_player_dashboard():
         exp_in_level / EXP_PER_LEVEL,
         text=f"EXP {exp_in_level} / {EXP_PER_LEVEL}（累積 {ss.exp}）"
     )
- 
- 
+
+
 def render_api_diagnostics():
     """側邊欄「API 診斷」：直接顯示 Gemini 真正的錯誤原因，不再只看到備援內容"""
     with st.expander("🔧 API 診斷"):
@@ -678,8 +712,8 @@ def render_api_diagnostics():
                 st.error(f"{type(e).__name__}: {e}")
         for line in reversed(st.session_state.get("llm_errors", [])):
             st.caption(line)
- 
- 
+
+
 def render_sidebar():
     """
     回傳 (image, image_sig, lang_level)
@@ -696,11 +730,11 @@ def render_sidebar():
             """
         )
         st.markdown("---")
- 
+
         # ---- 玩家儀表板 ----
         render_player_dashboard()
         st.markdown("---")
- 
+
         # ---- 語言程度分級（變數會傳入 LLM Prompt）----
         st.subheader("🌐 語言程度")
         lang_level = st.selectbox(
@@ -708,10 +742,11 @@ def render_sidebar():
             options=LANG_LEVELS,
             index=0,
             key="lang_level",
+            on_change=reset_quiz_state,      # 切換程度 -> 重置測驗狀態鎖，下一輪依新程度出題
             help="會影響外語例句與測驗題的難度"
         )
         st.markdown("---")
- 
+
         # ---- 影像輸入 ----
         st.subheader("📥 選擇影像輸入方式")
         input_method = st.radio(
@@ -721,7 +756,7 @@ def render_sidebar():
             key="input_method",
             on_change=reset_quiz_state,       # 切換來源也重置測驗
         )
- 
+
         input_image, image_sig = None, None
         if "📁 上傳圖片" in input_method:
             uploaded_file = st.file_uploader(
@@ -746,21 +781,21 @@ def render_sidebar():
                 data = camera_file.getvalue()
                 image_sig = hashlib.md5(data).hexdigest()[:12]
                 input_image = Image.open(io.BytesIO(data))
- 
+
         st.markdown("---")
         render_api_diagnostics()
         st.caption("Powered by Streamlit, Ultralytics YOLOv8 & Google Gemini")
- 
+
     return input_image, image_sig, lang_level
- 
- 
+
+
 # ==========================================
 # 6. 各頁籤渲染函式
 # ==========================================
 def render_tab_quick_record(plotted_rgb, detected_label, best_conf, traffic_light, en_word):
     """⚡ 快速健康紀錄：AI 視覺辨識 + 食科紅綠燈 + 生醫警語"""
     col1, col2 = st.columns(2, gap="large")
- 
+
     # 左：📷 [AI 視覺辨識]
     with col1:
         st.markdown("""
@@ -774,7 +809,7 @@ def render_tab_quick_record(plotted_rgb, detected_label, best_conf, traffic_ligh
             f"<span class='badge badge-label'>信心度：{best_conf:.1%}</span>",
             unsafe_allow_html=True
         )
- 
+
     # 右：🚦 [食科紅綠燈]
     with col2:
         st.markdown("""
@@ -782,7 +817,7 @@ def render_tab_quick_record(plotted_rgb, detected_label, best_conf, traffic_ligh
             <div class="card-header">🚦 [食科紅綠燈]</div>
         </div>
         """, unsafe_allow_html=True)
- 
+
         # 根據燈號給予對應提示色彩
         if "🔴" in str(traffic_light) or "紅燈" in str(traffic_light):
             st.error(f"### {traffic_light}")
@@ -793,11 +828,11 @@ def render_tab_quick_record(plotted_rgb, detected_label, best_conf, traffic_ligh
         else:
             st.success(f"### {traffic_light}")
             st.markdown("🌿 **營養評價**：富含優質微量元素或高膳食纖維，屬健康推薦食材！")
- 
+
         st.metric(label="健康等級", value=str(traffic_light).split()[0] + " 評級")
- 
+
     st.markdown("<br>", unsafe_allow_html=True)
- 
+
     # 下：🩺 [生醫 AI 動態分析]
     st.markdown("""
     <div class="card-box">
@@ -808,8 +843,8 @@ def render_tab_quick_record(plotted_rgb, detected_label, best_conf, traffic_ligh
         dynamic_warning = generate_dynamic_warning(en_word)
     st.info(f"**🔬 來自生醫系 AI 的專屬提醒：**\n\n{dynamic_warning}")
     st.caption("※ 本衛教內容由 Gemini AI 生成，僅供日常健康生活管理參考。")
- 
- 
+
+
 def render_tab_language(en_word, jp_word, quiz_question, quiz_ans, lang_level):
     """🌍 外語文化探索：雙語單字 + 分級例句(滑鼠懸停翻譯) + 文化小知識"""
     st.markdown("""
@@ -817,30 +852,30 @@ def render_tab_language(en_word, jp_word, quiz_question, quiz_ans, lang_level):
         <div class="card-header">🎌 [外語與文化微學習]</div>
     </div>
     """, unsafe_allow_html=True)
- 
+
     # 雙語單字對照卡片
     sub_c1, sub_c2 = st.columns(2)
     with sub_c1:
         st.metric(label="英語 English", value=str(en_word))
     with sub_c2:
         st.metric(label="日語 日本語", value=str(jp_word))
- 
+
     # 🔊 食物單字發音
     pc1, pc2 = st.columns(2)
     with pc1:
         render_speech_panel([(str(en_word), str(en_word))], "en-US", height=50)
     with pc2:
         render_speech_panel([(clean_speech_text(jp_word), clean_speech_text(jp_word))], "ja-JP", height=50)
- 
+
     st.markdown("---")
     st.markdown(f"##### 📖 {lang_level}程度例句　<small>（把滑鼠移到<u>虛線單字</u>上看翻譯）</small>",
                 unsafe_allow_html=True)
- 
+
     with st.spinner("AI 語言老師正在撰寫例句..."):
         culture, used_fallback = generate_culture_text(str(en_word), str(jp_word), lang_level)
     if used_fallback:
         st.caption("⚠️ AI 例句暫時無法生成，以下為內建基礎例句。")
- 
+
     lc1, lc2 = st.columns(2, gap="large")
     for col, lang_key, title in ((lc1, "en", "🇬🇧 English"), (lc2, "jp", "🇯🇵 日本語")):
         block = culture[lang_key]
@@ -857,7 +892,7 @@ def render_tab_language(en_word, jp_word, quiz_question, quiz_ans, lang_level):
             ]
             render_speech_panel(speech_items, "en-US" if lang_key == "en" else "ja-JP", height=90)
             render_tts_audio(block["sentence"], "en" if lang_key == "en" else "ja")
- 
+
     st.caption("💡 手機等觸控裝置無法「懸停」，可長按單字查看；完整單字表如下。")
     with st.expander("📚 本句單字表"):
         for lang_key, title in (("en", "English"), ("jp", "日本語")):
@@ -868,29 +903,32 @@ def render_tab_language(en_word, jp_word, quiz_question, quiz_ans, lang_level):
                     vocab_df.rename(columns={"word": "單字", "meaning": "意思"}),
                     hide_index=True, use_container_width=True
                 )
- 
+
     # 原本的文化小測驗（CSV 題庫）保留為「文化小知識」
     with st.expander("💡 文化小知識：點我展開隨堂提問"):
         st.markdown(f"**題目：{quiz_question}**")
         if st.checkbox("🙋 查看解答", key="reveal_quiz_answer"):
             st.markdown(f"🎉 **正解：** :green[**{quiz_ans}**]")
- 
- 
+
+
 def render_tab_quiz(row, food_df, quiz_id, lang_level):
     """🎯 每日測驗任務：根據辨識結果動態出題，含狀態鎖"""
     ss = st.session_state
     ensure_quiz(row, food_df, quiz_id, lang_level)
     quiz = ss.quiz_data
- 
+
     st.markdown("""
     <div class="card-box">
         <div class="card-header">🎯 [每日測驗任務]</div>
     </div>
     """, unsafe_allow_html=True)
-    st.caption(f"答對可獲得 +{EXP_PER_QUIZ} EXP｜每張照片只有一次作答機會")
- 
+    st.caption(f"目前程度：**{lang_level}**（可在左側切換，題目會跟著更換）｜"
+               f"答對可獲得 +{EXP_PER_QUIZ} EXP｜每個程度每張照片只有一次作答機會")
+    if quiz.get("source") == "fallback":
+        st.caption("⚠️ AI 出題暫時失敗，這是內建題庫的備援題（詳見側邊欄「API 診斷」）。")
+
     st.markdown(f"#### ❓ {quiz['question']}")
- 
+
     # radio 的 key 含 nonce：每次 reset 後都是全新元件，不會殘留上一題的選取
     st.radio(
         "請選擇答案：",
@@ -899,17 +937,17 @@ def render_tab_quiz(row, food_df, quiz_id, lang_level):
         key=f"quiz_choice_{ss.quiz_nonce}",
         disabled=ss.quiz_answered,           # 【狀態鎖】已作答 -> 選項鎖定
     )
- 
+
     st.button(
         "✅ 送出答案",
         on_click=submit_answer,              # 加分邏輯全在 callback 內
         disabled=ss.quiz_answered,           # 【狀態鎖】已作答 -> 按鈕鎖定，無法連點刷分
         type="primary",
     )
- 
+
     if ss.quiz_warn and not ss.quiz_answered:
         st.warning("請先選擇一個答案再送出喔！")
- 
+
     if ss.quiz_answered:
         if ss.quiz_correct:
             st.success(f"✅ 答對了！ {ss.quiz_reward_msg}")
@@ -918,33 +956,33 @@ def render_tab_quiz(row, food_df, quiz_id, lang_level):
         if quiz.get("explanation"):
             st.info(f"📝 解說：{quiz['explanation']}")
         st.caption("想繼續賺 EXP？請在左側換一張新的食物照片！")
- 
- 
+
+
 # ==========================================
 # 7. 主程序
 # ==========================================
 def main():
     # 0) 初始化玩家進度與 Streak（必須在 render_sidebar 之前）
     init_session_state()
- 
+
     # 載入模型與衛教資料庫
     model = load_yolo_model("yolov8n.pt")
     food_df = load_food_database("food_database.csv")
- 
+
     # 取得側邊欄影像輸入（含玩家儀表板、語言程度）
     image, image_sig, lang_level = render_sidebar()
- 
+
     # 主畫面標題與導言
     st.markdown('<div class="main-title">🥗 Bite & Learn 跨界識食</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="sub-title">從餐盤看見全世界：AI 物件辨識 ✕ 營養衛教 ✕ 生醫提醒 ✕ 跨語言文化互動</div>',
         unsafe_allow_html=True
     )
- 
+
     # 未上傳圖片時的引導介面
     if image is None:
         st.info("👈 請從左側側邊欄「上傳食物照片」或「開啟相機拍照」開始體驗！")
- 
+
         # 展開預覽目前資料庫已支援的食物導覽
         with st.expander("📋 點此查看資料庫目前支援的食物品項"):
             st.dataframe(
@@ -953,43 +991,43 @@ def main():
                 hide_index=True
             )
         return
- 
+
     # 確保圖片色彩空間為 RGB
     img_rgb = image.convert("RGB")
- 
+
     # 執行 YOLOv8 物件偵測推論
     with st.spinner("AI 正在仔細辨識您的餐點..."):
         results = model.predict(source=img_rgb, conf=0.25, verbose=False)
- 
+
     first_result = results[0]
     boxes = first_result.boxes
- 
+
     # 【防呆機制 1】畫面中未偵測到任何物件
     if len(boxes) == 0:
         st.warning("⚠️ 畫面中找不到食物，請換張照片試試看喔！")
         st.image(img_rgb, caption="您上傳的原始圖片", width=420)
         return
- 
+
     # 擷取信心度 (confidence) 最高的物件預測結果
     best_idx = int(boxes.conf.argmax())
     best_conf = float(boxes.conf[best_idx].cpu().numpy())
     best_cls_id = int(boxes.cls[best_idx].cpu().numpy())
     detected_label = str(first_result.names[best_cls_id]).strip().lower()
- 
+
     # 繪製辨識框圖片 (results[0].plot() 回傳為 BGR 陣列，需轉為 RGB)
     plotted_bgr = first_result.plot()
     plotted_rgb = plotted_bgr[..., ::-1]
- 
+
     # 資料庫比對
     matched = food_df[food_df["AI_Label"] == detected_label]
- 
+
     # 【防呆機制 2】偵測到的物件不在 CSV 資料庫中
     if matched.empty:
         st.warning(f"ℹ️ AI 認出這是 [{detected_label}]，但目前不在我們的健康資料庫中。")
         st.image(plotted_rgb, caption=f"AI 標註畫面（偵測標籤: {detected_label}，信心度: {best_conf:.1%}）", width=520)
         st.info("💡 提示：本衛教系統主要針對常見食物（如 pizza, apple, banana 等）。歡迎將更多食材加入至 `food_database.csv`！")
         return
- 
+
     # 比對成功，擷取資料欄位
     row = matched.iloc[0]
     en_word = row["EN_Word"]
@@ -997,29 +1035,29 @@ def main():
     traffic_light = row["Traffic_Light"]
     quiz_question = row["Quiz_Question"]
     quiz_ans = row["Quiz_Ans"]
- 
+
     # 測驗 ID = 圖片簽章 + 食物標籤：同一張圖同一食物 => 同一個 ID (用於防重複領獎與題目快取)
     quiz_id = f"{image_sig}:{detected_label}"
- 
+
     st.success(f"🎯 成功辨識餐點：**{en_word}** (`{detected_label}`)！信心度：**{best_conf:.1%}**")
- 
+
     # ==========================================
     # 三個頁籤
     # ==========================================
     tab_record, tab_lang, tab_quiz = st.tabs(
         ["⚡ 快速健康紀錄", "🌍 外語文化探索", "🎯 每日測驗任務"]
     )
- 
+
     with tab_record:
         render_tab_quick_record(plotted_rgb, detected_label, best_conf, traffic_light, en_word)
- 
+
     with tab_lang:
         render_tab_language(en_word, jp_word, quiz_question, quiz_ans, lang_level)
- 
+
     with tab_quiz:
         render_tab_quiz(row, food_df, quiz_id, lang_level)
- 
- 
+
+
 # ==========================================
 # 程式進入點
 # ==========================================
